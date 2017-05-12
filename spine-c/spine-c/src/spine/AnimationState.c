@@ -43,7 +43,7 @@ void spAnimationState_disposeStatics () {
 void _spAnimationState_disposeTrackEntry (spTrackEntry* entry);
 void _spAnimationState_disposeTrackEntries (spAnimationState* state, spTrackEntry* entry);
 void _spAnimationState_updateMixingFrom (spAnimationState* self, spTrackEntry* entry, float delta);
-float _spAnimationState_applyMixingFrom (spAnimationState* self, spTrackEntry* entry, spSkeleton* skeleton);
+float _spAnimationState_applyMixingFrom (spAnimationState* self, spTrackEntry* entry, spSkeleton* skeleton, float parent_alpha);
 void _spAnimationState_applyRotateTimeline (spAnimationState* self, spTimeline* timeline, spSkeleton* skeleton, float time, float alpha, int /*boolean*/ setupPose, float* timelinesRotation, int i, int /*boolean*/ firstFrame);
 void _spAnimationState_queueEvents (spAnimationState* self, spTrackEntry* entry, float animationTime);
 void _spAnimationState_setCurrent (spAnimationState* self, int index, spTrackEntry* current, int /*boolean*/ interrupt);
@@ -325,7 +325,7 @@ void spAnimationState_apply (spAnimationState* self, spSkeleton* skeleton) {
 		/* Apply mixing from entries first. */
 		mix = current->alpha;
 		if (current->mixingFrom)
-            mix *= _spAnimationState_applyMixingFrom(self, current, skeleton);
+            mix *= 1 - _spAnimationState_applyMixingFrom(self, current, skeleton, 1);
         else if (current->trackTime >= current->trackEnd)
             mix = 0;
 
@@ -359,7 +359,8 @@ void spAnimationState_apply (spAnimationState* self, spSkeleton* skeleton) {
 	_spEventQueue_drain(internal->queue);
 }
 
-float _spAnimationState_applyMixingFrom (spAnimationState* self, spTrackEntry* entry, spSkeleton* skeleton) {
+// returns the sum of the alpha of applied animations here and in children
+float _spAnimationState_applyMixingFrom (spAnimationState* self, spTrackEntry* entry, spSkeleton* skeleton, float parent_alpha) {
 	_spAnimationState* internal = SUB_CAST(_spAnimationState, self);
 	float mix;
 	spEvent** events;
@@ -378,14 +379,29 @@ float _spAnimationState_applyMixingFrom (spAnimationState* self, spTrackEntry* e
 	int i;
 
 	spTrackEntry* from = entry->mixingFrom;
-	if (from->mixingFrom) _spAnimationState_applyMixingFrom(self, from, skeleton);
-
 	if (entry->mixDuration == 0) /* Single frame mix to undo mixingFrom changes. */
 		mix = 1;
 	else {
 		mix = entry->mixTime / entry->mixDuration;
 		if (mix > 1) mix = 1;
 	}
+
+	// JE Changes:
+	//   Apply parent alpha to our us and our children
+	//     - this fixes A mix-> B nomix -> C still getting A mixed in!
+	//   Use the children's inverse alpha/mixing out instead of keeping track of a mixAlpha
+	//     - this fixes A mix-> B mix-> C having the alphas not sum to 1.0
+	//     - this is probably not quite right since that means this mix might sit stable as the
+	//       child mixes us up simultaneous with us trying to mix down, ends up having a mix
+	//       that started at 0.1 sit at around 0.1 for most of the mix duration, and then sharply fade,
+	//       though the other changes to reduce the duration below should mitigate that, but cause
+	//       the grandchild mix to fade out quicker than it would otherwise, if the child is only barely
+	//       mixed in when it is canceled.
+	float family_alpha = parent_alpha * (1 - mix);
+
+	float sub_alpha = 0;
+	if (from->mixingFrom)
+		sub_alpha = _spAnimationState_applyMixingFrom(self, from, skeleton, family_alpha);
 
 	events = mix < from->eventThreshold ? internal->events : 0;
 	attachments = mix < from->attachmentThreshold;
@@ -395,7 +411,7 @@ float _spAnimationState_applyMixingFrom (spAnimationState* self, spTrackEntry* e
 	timelineCount = from->animation->timelinesCount;
 	timelines = from->animation->timelines;
 	timelinesFirst = from->timelinesFirst;
-	alpha = from->alpha * entry->mixAlpha * (1 - mix);
+	alpha = from->alpha * (1 - sub_alpha) * (1 - mix) * parent_alpha;
 
 	firstFrame = from->timelinesRotationCount == 0;
 	if (firstFrame) _spAnimationState_resizeTimelinesRotation(from, timelineCount << 1);
@@ -420,7 +436,7 @@ float _spAnimationState_applyMixingFrom (spAnimationState* self, spTrackEntry* e
 	from->nextAnimationLast = animationTime;
 	from->nextTrackLast = from->trackTime;
 
-	return mix;
+	return MIN(sub_alpha + alpha, 1);
 }
 
 void _spAnimationState_applyRotateTimeline (spAnimationState* self, spTimeline* timeline, spSkeleton* skeleton, float time, float alpha, int /*boolean*/ setupPose, float* timelinesRotation, int i, int /*boolean*/ firstFrame) {
@@ -583,8 +599,16 @@ void _spAnimationState_setCurrent (spAnimationState* self, int index, spTrackEnt
 
 		from->timelinesRotationCount = 0;
 
-		/* If not completely mixed in, set mixAlpha so mixing out happens from current mix to zero. */
-		if (from->mixingFrom && from->mixDuration > 0) current->mixAlpha *= MIN(from->mixTime / from->mixDuration, 1);
+		if (from->mixingFrom && from->mixDuration > 0) {
+			// JE: not needed
+			/* If not completely mixed in, set mixAlpha so mixing out happens from current mix to zero. */
+			current->mixAlpha *= MIN(from->mixTime / from->mixDuration, 1);
+			// JE: Instead, use a shorter duration, since the previous one was only partially mixed in, mix out quicker
+			// JE: using mixAlpha here, and only here, to approximate the fact that, even if the mix is not far through
+			//   it's duration, it might have been a shortened mix already, indiated by mixAlpha.  Should maybe just
+			//   have a speed scale applied?
+			current->mixDuration *= MIN(current->mixAlpha * from->mixTime / from->mixDuration, 1);
+		}
 	}
 
 	_spEventQueue_start(internal->queue, current);
