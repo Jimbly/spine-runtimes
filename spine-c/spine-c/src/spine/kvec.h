@@ -83,7 +83,7 @@ int main() {
 #define kv_resize(type, v, s) do {									\
 		type* b = _kv_alloc(type, (s));								\
 		if (((s) > 0) && ((v).m > 0))								\
-			_kv_copy(type, b, (v).a, ((s) < (v).m)? (s) : (v).m);	\
+			_kv_copy(type, b, (v).a, ((size_t)(s) < (v).m)? (s) : (v).m);	\
 		_kv_free(type, (v).a);										\
 		(v).a = b; (v).m = (s);										\
 	} while (0)

@@ -164,7 +164,7 @@ void spBone_updateWorldTransformWith (spBone* self, float x, float y, float rota
 			za *= s;
 			zc *= s;
 			s = SQRT(za * za + zc * zc);
-			r = PI / 2 + atan2(zc, za);
+			r = (float)(PI / 2 + atan2(zc, za));
 			zb = COS(r) * s;
 			zd = SIN(r) * s;
 			la = COS_DEG(shearX) * scaleX;
